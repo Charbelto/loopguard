@@ -100,3 +100,42 @@ def test_cycle_detection_custom_min_repeats():
     # Should NOT find cycle if min_repeats is 3
     cycle, length = tracker.check_cycles(min_repeats=3, min_length=1, max_length=5)
     assert cycle is None
+
+
+def test_state_tracker_max_history():
+    tracker = StateTracker(max_history=3)
+    step1 = AgentStep(action="a", input_text="x")
+    step2 = AgentStep(action="b", input_text="y")
+    step3 = AgentStep(action="c", input_text="z")
+    step4 = AgentStep(action="d", input_text="w")
+
+    tracker.add_step(step1)
+    tracker.add_step(step2)
+    tracker.add_step(step3)
+    tracker.add_step(step4)
+
+    # Sequence should be truncated to length 3
+    assert len(tracker.state_sequence) == 3
+    assert tracker.state_sequence == [2, 3, 4]
+
+
+def test_state_tracker_custom_similarity_fn():
+    # Define a custom similarity function checking character difference length
+    def length_diff_similarity(s1, s2):
+        if abs(len(s1.input_text) - len(s2.input_text)) <= 2:
+            return 1.0
+        return 0.0
+
+    tracker = StateTracker(
+        similarity_threshold=0.8, similarity_fn=length_diff_similarity
+    )
+    step1 = AgentStep(action="a", input_text="abc")
+    step2 = AgentStep(action="b", input_text="abcd")  # diff of 1, matches!
+    step3 = AgentStep(action="a", input_text="abcdefgh")  # diff of 5, doesn't match!
+
+    id1 = tracker.add_step(step1)
+    id2 = tracker.add_step(step2)
+    id3 = tracker.add_step(step3)
+
+    assert id1 == id2
+    assert id3 != id1

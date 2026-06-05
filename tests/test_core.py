@@ -81,3 +81,16 @@ def test_healing_prompt():
     assert "[SYSTEM NOTICE]" in prompt
     assert "file_write" in prompt
     assert "data.json" in prompt
+
+
+def test_loopguard_max_history():
+    guard = LoopGuard(max_history=2)
+    guard.add_step(action="a", input_text="1")
+    guard.add_step(action="b", input_text="2")
+    guard.add_step(action="c", input_text="3")
+
+    # steps_history and tracker.state_sequence should both be truncated to length 2
+    assert len(guard.steps_history) == 2
+    assert len(guard.tracker.state_sequence) == 2
+    assert guard.steps_history[0].input_text == "2"
+    assert guard.steps_history[1].input_text == "3"

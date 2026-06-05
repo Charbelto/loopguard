@@ -10,16 +10,23 @@ class StateTracker:
     def __init__(
         self,
         similarity_threshold: float = 0.75,
+        max_history: int = 100,
         embedding_fn: Optional[Callable[[str], List[float]]] = None,
+        similarity_fn: Optional[Callable[[AgentStep, AgentStep], float]] = None,
     ):
         self.similarity_threshold = similarity_threshold
+        self.max_history = max_history
         self.embedding_fn = embedding_fn
+        self.similarity_fn = similarity_fn
         self.tfidf = TFIDFSimilarity()
         self.states: List[State] = []
         self.state_sequence: List[int] = []
 
     def _get_similarity(self, step1: AgentStep, step2: AgentStep) -> float:
         """Calculate similarity between two agent steps."""
+        if self.similarity_fn:
+            return self.similarity_fn(step1, step2)
+
         # The actions (e.g. tool name) must match exactly
         if step1.action != step2.action:
             return 0.0
@@ -65,6 +72,8 @@ class StateTracker:
             self.states.append(new_state)
 
         self.state_sequence.append(state_id)
+        if len(self.state_sequence) > self.max_history:
+            self.state_sequence = self.state_sequence[-self.max_history :]
         return state_id
 
     def check_cycles(

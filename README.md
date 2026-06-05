@@ -233,7 +233,9 @@ Below is the visual benchmark analytics comparison:
 | **`similarity_threshold`** | `float` | `0.75` | Cosine similarity value above which two steps are clustered into the same state. |
 | **`min_repeats`** | `int` | `3` | The minimum number of sequential repetitions required to flag a cycle. |
 | **`max_cycle_length`** | `int` | `5` | The maximum length of sequence cycles to detect (e.g. 1, 2, 3, 4, 5). |
+| **`max_history`** | `int` | `100` | Sliding window telemetry bounds to prevent unbounded memory growth in long sessions. |
 | **`embedding_fn`** | `Callable[[str], List[float]]` | `None` | Optional custom embedding function. If provided, replaces the local TF-IDF engine. |
+| **`similarity_fn`** | `Callable[[AgentStep, AgentStep], float]` | `None` | Optional custom similarity callback to fully control how two steps are compared. |
 | **`on_loop_detected`** | `Callable[[List[int], int], None]` | `None` | Optional callback executed when a loop is detected. |
 
 ---

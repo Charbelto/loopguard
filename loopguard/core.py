@@ -20,14 +20,20 @@ class LoopGuard:
         similarity_threshold: float = 0.75,
         min_repeats: int = 3,
         max_cycle_length: int = 5,
+        max_history: int = 100,
         embedding_fn: Optional[Callable[[str], List[float]]] = None,
+        similarity_fn: Optional[Callable[[AgentStep, AgentStep], float]] = None,
         on_loop_detected: Optional[Callable[[List[int], int], None]] = None,
     ):
         self.tracker = StateTracker(
-            similarity_threshold=similarity_threshold, embedding_fn=embedding_fn
+            similarity_threshold=similarity_threshold,
+            max_history=max_history,
+            embedding_fn=embedding_fn,
+            similarity_fn=similarity_fn,
         )
         self.min_repeats = min_repeats
         self.max_cycle_length = max_cycle_length
+        self.max_history = max_history
         self.on_loop_detected = on_loop_detected
         self.steps_history: List[AgentStep] = []
 
@@ -49,6 +55,8 @@ class LoopGuard:
             metadata=metadata or {},
         )
         self.steps_history.append(step)
+        if len(self.steps_history) > self.max_history:
+            self.steps_history = self.steps_history[-self.max_history :]
         self.tracker.add_step(step)
 
         cycle, length = self.tracker.check_cycles(
