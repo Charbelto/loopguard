@@ -15,16 +15,19 @@ Unlike naive iteration counters or exact-match signature hashes, `loopguard` use
 ## 📖 Table of Contents
 1. [The Problem: Agent Loops](#-the-problem-agent-loops)
 2. [How LoopGuard Works](#-how-loopguard-works)
-3. [Architecture & Flow](#-architecture--flow)
-4. [Installation](#-installation)
-5. [Quickstart](#-quickstart)
-6. [Framework Integrations](#-framework-integrations)
-   - [Custom Agent Loops](#1-custom-agent-loops)
-   - [LangChain Integration](#2-langchain-callback-handler)
-   - [LangGraph Integration](#3-langgraph-router-node)
-7. [Benchmarks & Efficiency Gains](#-benchmarks--efficiency-gains)
-8. [API Reference & Configurations](#-api-reference--configurations)
-9. [License](#-license)
+3. [Declarative Rules Engine](#-declarative-rules-engine)
+4. [Adaptive Healing & Mitigation](#-adaptive-healing--mitigation)
+5. [Telemetry & Visualizations](#-telemetry--visualizations)
+6. [Architecture & Flow](#-architecture--flow)
+7. [Installation](#-installation)
+8. [Quickstart](#-quickstart)
+9. [Framework Integrations](#-framework-integrations)
+   - [LangChain Integration](#1-langchain-callback-handler)
+   - [LangGraph Integration](#2-langgraph-node-wrapper)
+   - [LlamaIndex Integration](#3-llamaindex-callback-handler)
+10. [Benchmarks & Efficiency Gains](#-benchmarks--efficiency-gains)
+11. [API Reference & Configurations](#-api-reference--configurations)
+12. [License](#-license)
 
 ---
 
@@ -50,6 +53,99 @@ Autonomous agents built using LLMs (using LangChain, LangGraph, CrewAI, Autogen,
 3. **Semantic State Clustering**: Incoming steps are compared to existing states based on action type (exact match) and input/observation cosine similarity. If the similarity is above the threshold (default: `0.75`), the step maps to an existing state ID. Otherwise, a new state ID is generated.
 4. **Symmetric Observation Evaluation**: Observations are only compared if *both* steps contain them. This allows developers to check for loop cycles *before* executing tools (saving API cost), while evaluating inputs and results symmetrically when both are available.
 5. **Sequence Cycle Detection**: The sequence of mapped state IDs is evaluated against a sliding-window cycle checker. It analyzes subsequences of lengths $L$ (ranging from $1$ to $5$) for repetitions. If a pattern repeats `min_repeats` times sequentially (e.g. `[1, 2, 1, 2, 1, 2]`), a `LoopDetectedError` is raised.
+---
+
+## 🛡️ Declarative Rules Engine
+
+`loopguard` includes a powerful declarative rules engine that allows you to specify custom constraints over the agent's telemetry history.
+
+Register rules using `guard.add_rule(rule)` or pass a list of rules to the constructor:
+
+```python
+from loopguard import LoopGuard
+from loopguard.rules import (
+    MaxConsecutiveSimilarityRule,
+    ActionOscillationRule,
+    StateFrequencyRule,
+    JSONGuardRule
+)
+
+# Initialize with custom guardrails
+guard = LoopGuard(rules=[
+    # 1. Catch when the agent repeatedly retries similar web search queries consecutively
+    MaxConsecutiveSimilarityRule(action="web_search", max_consecutive=3),
+    # 2. Catch tool ping-ponging/oscillation
+    ActionOscillationRule(max_oscillations=3, window_size=6),
+    # 3. Prevent the agent from returning to the same semantic state more than 4 times
+    StateFrequencyRule(max_frequency=4, window_size=10),
+    # 4. Ensure tool outputs are valid JSON, preventing syntax loops
+    JSONGuardRule(target="observation")
+])
+```
+
+### Built-in Rules Reference
+
+| Rule | Parameters | Description |
+| :--- | :--- | :--- |
+| **`CycleDetectionRule`** | `min_length`, `max_length`, `min_repeats` | Standard sequence loop detection (default rule). |
+| **`MaxConsecutiveSimilarityRule`** | `action`, `max_consecutive` | Flags when identical/similar steps occur consecutively. |
+| **`ActionOscillationRule`** | `max_oscillations`, `window_size` | Detects alternating sets of action names (e.g. A->B->A->B). |
+| **`StateFrequencyRule`** | `max_frequency`, `window_size` | Flags if a single state occurs too many times in a window. |
+| **`ResourceLimitRule`** | `max_steps`, `max_duration_seconds` | Caps the execution steps or duration. |
+| **`RegexGuardRule`** | `pattern`, `target`, `block` | Allowlists or blocklists fields based on regex matching. |
+| **`JSONGuardRule`** | `target` | Enforces that inputs or observations contain valid JSON parsing format. |
+
+---
+
+## 🩹 Adaptive Healing & Mitigation
+
+When a guardrail rule is violated, `loopguard` raises a `LoopDetectedError` that encapsulates metadata about the violated rule and the execution history. You can retrieve an **adaptive healing prompt** containing custom correction instructions based on which rule failed:
+
+```python
+try:
+    guard.add_step(action="read_config", input_text="settings.json")
+except LoopDetectedError as e:
+    # Get recovery instructions tailored to the failed rule
+    healing_prompt = guard.get_healing_prompt(violated_rule=e.violated_rule)
+    print(healing_prompt)
+```
+
+For instance:
+* **JSONGuardRule Violation**: Injects feedback reminding the LLM to format its response as well-formed JSON and escape quotes properly.
+* **MaxConsecutiveSimilarityRule Violation**: Advises the LLM to choose a completely different tool or query arguments since the previous consecutive retries failed.
+* **ActionOscillationRule Violation**: Explains the ping-pong pattern to the LLM and directs it to modify its reasoning path.
+
+---
+
+## 📊 Telemetry & Visualizations
+
+### 1. Mermaid Flowchart Exporter
+Convert your agent's execution history into an interactive Mermaid.js diagram to visualize state transitions:
+
+```python
+from loopguard import TelemetryVisualizer
+
+# Print Mermaid.js markup representing the telemetry graph
+mermaid_code = TelemetryVisualizer.to_mermaid_flowchart(guard.tracker)
+print(mermaid_code)
+```
+
+Example rendered output:
+```mermaid
+flowchart TD
+  S1["State 1: web_search (chicago weather...)"]
+  S2["State 2: write_file (log.txt...)"]
+  S1 --> S2
+  S2 --> S1
+```
+
+### 2. Structured Telemetry Exporter
+Export the session history as a clean JSON-serializable dictionary for external telemetry and logging tools:
+
+```python
+history_dict = TelemetryVisualizer.to_dict(guard.steps_history, guard.tracker.state_sequence)
+print(history_dict)
+```
 
 ---
 
@@ -121,84 +217,52 @@ for step in range(10):
 
 ## 🔌 Framework Integrations
 
-### 1. Custom Agent Loops
-Catch oscillations, inject healing prompts, and allow the agent to adapt and succeed:
+`loopguard` offers out-of-the-box integration classes for major LLM agent frameworks under `loopguard.integrations`.
+
+### 1. LangChain Callback Handler
+Hook into LangChain's tool execution lifecycles:
 
 ```python
-from loopguard import LoopGuard, LoopDetectedError
+from langchain.agents import initialize_agent
+from loopguard import LoopGuard
+from loopguard.integrations.langchain import LoopGuardCallbackHandler
 
 guard = LoopGuard(similarity_threshold=0.8, min_repeats=3)
-last_obs = None
-system_notice = None
+handler = LoopGuardCallbackHandler(guard)
 
-while True:
-    # 1. Plan next step, passing system notice if a loop was detected
-    action, inputs = agent.think(last_observation=last_obs, system_notice=system_notice)
-    if action == "stop":
-        break
-        
-    system_notice = None
-    
-    # 2. Intercept loops before calling tools
-    try:
-        guard.add_step(action=action, input_text=inputs)
-    except LoopDetectedError:
-        # Extract the self-healing instruction
-        system_notice = guard.get_healing_prompt()
-        continue # Retry planning with the healing notice injected
-        
-    # 3. Run tool and update telemetry
-    last_obs = tool.run(action, inputs)
-    guard.steps_history[-1].observation = last_obs
+# Pass the handler as a callback during agent run
+agent_executor.run("your prompt", callbacks=[handler])
 ```
 
-### 2. LangChain Callback Handler
-Hook seamlessly into LangChain lifecycles:
+### 2. LangGraph Node Wrapper
+Wrap node logic inside LangGraph workflows to auto-detect loops and inject self-healing prompts back into the state messages:
 
 ```python
-from langchain_core.callbacks import BaseCallbackHandler
-from loopguard import LoopGuard, LoopDetectedError
+from loopguard import LoopGuard
+from loopguard.integrations.langgraph import wrap_node_with_guard
 
-class LoopGuardCallbackHandler(BaseCallbackHandler):
-    def __init__(self, threshold=0.8, min_repeats=3):
-        self.guard = LoopGuard(similarity_threshold=threshold, min_repeats=min_repeats)
+guard = LoopGuard(min_repeats=3)
 
-    def on_tool_start(self, serialized: dict, input_str: str, **kwargs) -> None:
-        tool_name = serialized.get("name", "unknown_tool")
-        try:
-            self.guard.add_step(action=tool_name, input_text=input_str)
-        except LoopDetectedError as e:
-            raise RuntimeError(f"Execution blocked by LoopGuard: repeating cycle {e.cycle}") from e
+# Wrap your existing agent node function
+guarded_agent_node = wrap_node_with_guard(agent_node, guard)
 
-    def on_tool_end(self, output: str, **kwargs) -> None:
-        if self.guard.steps_history:
-            self.guard.steps_history[-1].observation = str(output)
+# Add guarded node to your StateGraph
+workflow.add_node("agent", guarded_agent_node)
 ```
 
-### 3. LangGraph Router Node
-Route state transitions based on telemetry cycles:
+### 3. LlamaIndex Callback Handler
+Integrate with LlamaIndex event and callback brokers:
 
 ```python
-from loopguard import LoopGuard, LoopDetectedError
+from llama_index.core import Settings
+from loopguard import LoopGuard
+from loopguard.integrations.llamaindex import LlamaIndexLoopGuardHandler
 
-def loop_guard_router(state: dict) -> str:
-    messages = state["messages"]
-    guard: LoopGuard = state["loop_guard"]
-    
-    if not messages:
-        return "continue"
-        
-    last_msg = messages[-1]
-    action = last_msg.get("action")
-    inputs = last_msg.get("inputs")
-    
-    try:
-        # Check for loop cycle before running tools
-        guard.add_step(action=action, input_text=inputs)
-        return "call_tools"
-    except LoopDetectedError:
-        # Route control to a healing node that appends system notice
-        return "heal_node"
+guard = LoopGuard(similarity_threshold=0.8, min_repeats=3)
+handler = LlamaIndexLoopGuardHandler(guard)
+
+# Add to callback manager
+Settings.callback_manager.add_handler(handler)
 ```
 
 ---
@@ -231,12 +295,13 @@ Below is the visual benchmark analytics comparison:
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | **`similarity_threshold`** | `float` | `0.75` | Cosine similarity value above which two steps are clustered into the same state. |
-| **`min_repeats`** | `int` | `3` | The minimum number of sequential repetitions required to flag a cycle. |
-| **`max_cycle_length`** | `int` | `5` | The maximum length of sequence cycles to detect (e.g. 1, 2, 3, 4, 5). |
+| **`min_repeats`** | `int` | `3` | The minimum number of sequential repetitions required to flag a cycle (used if default rule is active). |
+| **`max_cycle_length`** | `int` | `5` | The maximum length of sequence cycles to detect (used if default rule is active). |
 | **`max_history`** | `int` | `100` | Sliding window telemetry bounds to prevent unbounded memory growth in long sessions. |
 | **`embedding_fn`** | `Callable[[str], List[float]]` | `None` | Optional custom embedding function. If provided, replaces the local TF-IDF engine. |
 | **`similarity_fn`** | `Callable[[AgentStep, AgentStep], float]` | `None` | Optional custom similarity callback to fully control how two steps are compared. |
-| **`on_loop_detected`** | `Callable[[List[int], int], None]` | `None` | Optional callback executed when a loop is detected. |
+| **`on_loop_detected`** | `Callable[..., None]` | `None` | Optional callback executed when a loop or rule violation is detected. |
+| **`rules`** | `List[BaseRule]` | `None` | Optional list of custom guardrail rules. If omitted, defaults to standard `CycleDetectionRule`. |
 
 ---
 
