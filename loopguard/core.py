@@ -1,14 +1,25 @@
 from typing import List, Callable, Optional, Dict, Any
 from .models import AgentStep
 from .graph import StateTracker
+from .rules import BaseRule, CycleDetectionRule
+from .healing import HealingStrategy
 
 
 class LoopDetectedError(Exception):
-    """Exception raised when an agentic execution loop is detected."""
+    """Exception raised when an agentic execution loop or guardrail rule is violated."""
 
-    def __init__(self, cycle: List[int], repeat_count: int, message: str):
+    def __init__(
+        self,
+        message: str,
+        violated_rule: Optional[BaseRule] = None,
+        cycle: Optional[List[int]] = None,
+        repeat_count: int = 0,
+    ):
         super().__init__(message)
-        self.cycle = cycle
+        self.message = message
+        self.violated_rule = violated_rule
+        # For backward compatibility
+        self.cycle = cycle or []
         self.repeat_count = repeat_count
 
 
@@ -23,7 +34,8 @@ class LoopGuard:
         max_history: int = 100,
         embedding_fn: Optional[Callable[[str], List[float]]] = None,
         similarity_fn: Optional[Callable[[AgentStep, AgentStep], float]] = None,
-        on_loop_detected: Optional[Callable[[List[int], int], None]] = None,
+        on_loop_detected: Optional[Callable[..., None]] = None,
+        rules: Optional[List[BaseRule]] = None,
     ):
         self.tracker = StateTracker(
             similarity_threshold=similarity_threshold,
@@ -36,6 +48,23 @@ class LoopGuard:
         self.max_history = max_history
         self.on_loop_detected = on_loop_detected
         self.steps_history: List[AgentStep] = []
+        self.healing_strategy = HealingStrategy()
+
+        if rules is None:
+            # Default backwards compatibility cycle checking rule
+            self.rules: List[BaseRule] = [
+                CycleDetectionRule(
+                    min_length=1,
+                    max_length=self.max_cycle_length,
+                    min_repeats=self.min_repeats,
+                )
+            ]
+        else:
+            self.rules = list(rules)
+
+    def add_rule(self, rule: BaseRule) -> None:
+        """Register a new guardrail constraint rule."""
+        self.rules.append(rule)
 
     def add_step(
         self,
@@ -46,7 +75,7 @@ class LoopGuard:
     ) -> bool:
         """
         Record an execution step.
-        Returns True if safe, raises LoopDetectedError if a loop is detected.
+        Returns True if safe, raises LoopDetectedError if a loop or rule violation is detected.
         """
         step = AgentStep(
             action=action,
@@ -59,30 +88,66 @@ class LoopGuard:
             self.steps_history = self.steps_history[-self.max_history :]
         self.tracker.add_step(step)
 
-        cycle, length = self.tracker.check_cycles(
-            min_length=1, max_length=self.max_cycle_length, min_repeats=self.min_repeats
-        )
+        # Evaluate all registered rules
+        for rule in self.rules:
+            if rule.check(
+                self.steps_history, self.tracker.state_sequence, self.tracker
+            ):
+                message = (
+                    f"Loop detected: Rule '{rule.name}' violated. {rule.description}."
+                )
 
-        if cycle:
-            message = (
-                f"Loop detected: State cycle {cycle} (length {length}) "
-                f"repeated {self.min_repeats} times."
-            )
-            if self.on_loop_detected:
-                self.on_loop_detected(cycle, self.min_repeats)
-            raise LoopDetectedError(cycle, self.min_repeats, message)
+                cycle = getattr(rule, "violated_cycle", None)
+                repeats = getattr(rule, "min_repeats", 0) if cycle else 0
+
+                if self.on_loop_detected:
+                    if isinstance(rule, CycleDetectionRule):
+                        try:
+                            # Try old signature first: on_loop_detected(cycle, repeats)
+                            self.on_loop_detected(cycle, repeats)
+                        except TypeError:
+                            # Fallback if they expect (rule, message)
+                            try:
+                                self.on_loop_detected(rule, message)
+                            except TypeError:
+                                pass
+                    else:
+                        try:
+                            # Try passing rule and message
+                            self.on_loop_detected(rule, message)
+                        except TypeError:
+                            # Fallback to (cycle, repeats) signature
+                            try:
+                                self.on_loop_detected([], 0)
+                            except TypeError:
+                                pass
+
+                raise LoopDetectedError(
+                    message=message,
+                    violated_rule=rule,
+                    cycle=cycle,
+                    repeat_count=repeats,
+                )
 
         return True
 
-    def get_healing_prompt(self) -> str:
+    def get_healing_prompt(self, violated_rule: Optional[BaseRule] = None) -> str:
         """Get a system instructions prompt to guide the LLM out of its execution loop."""
         if not self.steps_history:
             return ""
 
-        last_step = self.steps_history[-1]
-        return (
-            "\n[SYSTEM NOTICE]: You have repeated the action '{action}' with inputs/results "
-            "similar to '{input_val}' multiple times. This indicates you are stuck in an execution cycle. "
-            "Do not retry this action again with similar parameters. Try a completely different reasoning path "
-            "or check for alternative tools to achieve your goal."
-        ).format(action=last_step.action, input_val=last_step.input_text[:120])
+        # If no specific rule passed, look for the first rule that currently violates history
+        rule_to_heal = violated_rule
+        if rule_to_heal is None:
+            for rule in self.rules:
+                if rule.check(
+                    self.steps_history, self.tracker.state_sequence, self.tracker
+                ):
+                    rule_to_heal = rule
+                    break
+
+        if rule_to_heal is None:
+            # Fallback to general formatting using the first rule or default
+            rule_to_heal = self.rules[0] if self.rules else CycleDetectionRule()
+
+        return self.healing_strategy.format_prompt(rule_to_heal, self.steps_history)
