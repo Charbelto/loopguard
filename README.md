@@ -57,7 +57,25 @@ Autonomous agents built using LLMs (using LangChain, LangGraph, CrewAI, Autogen,
 
 The following diagram illustrates how state transitions are intercepted and routed to recovery nodes in an agentic workflow:
 
-![Agent Loop Prevention Logic](assets/loop_flowchart.png)
+```mermaid
+graph TD
+    classDef default fill:#1e1e2e,stroke:#cdd6f4,stroke-width:1px,color:#cdd6f4;
+    classDef agent fill:#1e1e2e,stroke:#89b4fa,stroke-width:2px,color:#89b4fa;
+    classDef guard fill:#1e1e2e,stroke:#f9e2af,stroke-width:2px,color:#f9e2af;
+    classDef safe fill:#1e1e2e,stroke:#a6e3a1,stroke-width:2px,color:#a6e3a1;
+    classDef loop fill:#1e1e2e,stroke:#f38ba8,stroke-width:2px,color:#f38ba8;
+
+    Agent["Agent Planning"]:::agent
+    Router["LoopGuard Interceptor Router<br/>(Checks state cycle)"]:::guard
+    Tool["Tool Node"]:::safe
+    Healer["Healer Node<br/>(Injects system healing context)"]:::loop
+
+    Agent --> Router
+    Router -->|A: Safe| Tool
+    Router -->|B: Loop Detected| Healer
+    Tool --> Agent
+    Healer --> Agent
+```
 
 ---
 
